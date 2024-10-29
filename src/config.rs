@@ -27,16 +27,13 @@ use std::{
 };
 
 use fs_err as fs;
-use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::info;
 
 use crate::{controller::middleware, environment::Environment, logger, scheduler, Error, Result};
 
-lazy_static! {
-    static ref DEFAULT_FOLDER: PathBuf = PathBuf::from("config");
-}
+pub const DEFAULT_CONFIG_FOLDER: &str = "config";
 
 /// Main application configuration structure.
 ///
@@ -496,7 +493,7 @@ impl Config {
     ///     Config::new(environment).expect("configuration loading")
     /// }
     pub fn new(env: &Environment) -> Result<Self> {
-        let config = Self::from_folder(env, DEFAULT_FOLDER.as_path())?;
+        let config = Self::from_folder(env, PathBuf::from(DEFAULT_CONFIG_FOLDER).as_path())?;
         Ok(config)
     }
 

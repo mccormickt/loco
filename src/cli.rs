@@ -36,7 +36,7 @@ use crate::{
         create_app, create_context, list_endpoints, list_middlewares, run_scheduler, run_task,
         start, RunDbCommand, ServeParams, StartMode,
     },
-    config::Config,
+    config::{Config, DEFAULT_CONFIG_FOLDER},
     environment::{resolve_from_env, Environment, DEFAULT_ENVIRONMENT},
     logger, task, Error,
 };
@@ -59,6 +59,10 @@ struct Cli {
     /// Specify the environment
     #[arg(short, long, global = true, help = &format!("Specify the environment [default: {}]", DEFAULT_ENVIRONMENT))]
     environment: Option<String>,
+
+    /// specify path to the configuration directory
+    #[arg(short, long, global = true, help = &format!("Specify the path to the configuration directory [default: {}]", DEFAULT_CONFIG_FOLDER))]
+    config_dir: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -453,7 +457,10 @@ pub async fn main<H: Hooks, M: MigratorTrait>() -> crate::Result<()> {
     let cli: Cli = Cli::parse();
     let environment: Environment = cli.environment.unwrap_or_else(resolve_from_env).into();
 
-    let config = environment.load()?;
+    let config = match cli.config_dir {
+        Some(dir) => environment.load_from_folder(PathBuf::from(&dir).as_path())?,
+        None => environment.load()?,
+    };
 
     if !H::init_logger(&config, &environment)? {
         logger::init::<H>(&config.logger);
@@ -594,7 +601,10 @@ pub async fn main<H: Hooks>() -> crate::Result<()> {
     let cli = Cli::parse();
     let environment: Environment = cli.environment.unwrap_or_else(resolve_from_env).into();
 
-    let config = environment.load()?;
+    let config = match cli.config_dir {
+        Some(dir) => environment.load_from_folder(PathBuf::from(&dir).as_path())?,
+        None => environment.load()?,
+    };
 
     if !H::init_logger(&config, &environment)? {
         logger::init::<H>(&config.logger);
