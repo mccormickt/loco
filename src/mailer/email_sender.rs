@@ -118,6 +118,10 @@ impl EmailSender {
             builder = builder.reply_to(reply_to.parse()?);
         }
 
+        if let Some(message_id) = email.message_id.clone() {
+            builder = builder.message_id(Some(message_id));
+        }
+
         let msg = builder
             .subject(email.subject.clone())
             .multipart(content)
@@ -171,6 +175,7 @@ mod tests {
             html: html.to_string(),
             bcc: None,
             cc: None,
+            message_id: None,
         };
         assert!(sender.mail(&data).await.is_ok());
 
