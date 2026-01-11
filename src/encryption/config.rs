@@ -67,7 +67,7 @@ impl EncryptionConfig {
     pub fn is_key_derivation_enabled(&self) -> bool {
         self.key_derivation
             .as_ref()
-            .map_or(false, |kd| kd.enabled && kd.salt.is_some())
+            .is_some_and(|kd| kd.enabled && kd.salt.is_some())
     }
 }
 

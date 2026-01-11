@@ -4,6 +4,17 @@
 //! encrypted on an `ActiveModel`, and the `ModelDecryption` trait for decrypting
 //! fields on a `Model`.
 //!
+//! # Convenience Macro
+//!
+//! Use the `impl_encryptable_fields!` macro to reduce boilerplate:
+//!
+//! ```rust,ignore
+//! use loco_rs::impl_encryptable_fields;
+//!
+//! // Instead of manually implementing all methods:
+//! impl_encryptable_fields!(users::ActiveModel, [ssn, credit_card]);
+//! ```
+//!
 //! # Usage
 //!
 //! 1. Implement `Encryptable` on your `ActiveModel`:
@@ -225,8 +236,10 @@ pub trait ModelDecryption: Sized + Serialize + DeserializeOwned {
                     // Try decrypting with each key until one succeeds
                     let mut decrypted = None;
                     let mut last_error = None;
+                    let mut keys_tried = 0;
 
-                    for (key, _key_id) in &decryption_keys {
+                    for (key, key_id) in &decryption_keys {
+                        keys_tried += 1;
                         // Get field-specific key if derivation is used
                         let field_key = provider.get_field_key(&field_name).unwrap_or(key.clone());
 
@@ -236,6 +249,12 @@ pub trait ModelDecryption: Sized + Serialize + DeserializeOwned {
                                 break;
                             }
                             Err(e) => {
+                                tracing::debug!(
+                                    field = %field_name,
+                                    key_id = ?key_id,
+                                    error = %e,
+                                    "decryption attempt failed, trying next key"
+                                );
                                 last_error = Some(e);
                             }
                         }
@@ -246,11 +265,20 @@ pub trait ModelDecryption: Sized + Serialize + DeserializeOwned {
                             *encrypted_json = serde_json::Value::String(plaintext);
                         }
                         None => {
-                            return Err(last_error.unwrap_or_else(|| {
-                                EncryptionError::DecryptionFailed(
-                                    "no keys available for decryption".into(),
+                            return Err(if keys_tried == 0 {
+                                EncryptionError::field_decryption_failed(
+                                    &field_name,
+                                    "no keys available for decryption",
+                                    None,
                                 )
-                            }));
+                            } else {
+                                EncryptionError::all_keys_failed(
+                                    keys_tried,
+                                    last_error
+                                        .map(|e| e.to_string())
+                                        .unwrap_or_else(|| "unknown error".to_string()),
+                                )
+                            });
                         }
                     }
                 }

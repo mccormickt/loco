@@ -131,5 +131,211 @@ pub use cipher::{decrypt, encrypt, parse_hex_key, KEY_SIZE, NONCE_SIZE, TAG_SIZE
 pub use config::{EncryptionConfig, KeyDerivationConfig};
 pub use encryptable::{decrypt_field, encrypt_field, Encryptable, ModelDecryption};
 pub use errors::{EncryptionError, EncryptionResult};
-pub use format::{is_encrypted_format, EncryptedHeaders, EncryptedValue};
-pub use key_provider::{ConfigKeyProvider, KeyProvider, StaticKeyProvider};
+pub use format::{
+    debug, estimate_encrypted_size, is_encrypted_format, EncryptedHeaders, EncryptedValue,
+    EncryptionMetadata,
+};
+pub use key_provider::{ConfigKeyProvider, KeyProvider, SecureKey, StaticKeyProvider};
+
+/// Convenience macro to implement `Encryptable` for an ActiveModel
+///
+/// This macro reduces boilerplate by generating the `get_set_string_value`
+/// and `set_string_value` implementations automatically.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use loco_rs::impl_encryptable_fields;
+///
+/// // Implements Encryptable for users::ActiveModel with ssn and credit_card as encrypted fields
+/// impl_encryptable_fields!(users::ActiveModel, [ssn, credit_card]);
+///
+/// // Is equivalent to:
+/// impl Encryptable for users::ActiveModel {
+///     fn encrypted_fields() -> Vec<String> {
+///         vec!["ssn".to_string(), "credit_card".to_string()]
+///     }
+///
+///     fn get_set_string_value(&self, field_name: &str) -> Option<String> {
+///         match field_name {
+///             "ssn" => match &self.ssn {
+///                 sea_orm::ActiveValue::Set(v) => Some(v.clone()),
+///                 _ => None,
+///             },
+///             "credit_card" => match &self.credit_card {
+///                 sea_orm::ActiveValue::Set(v) => Some(v.clone()),
+///                 _ => None,
+///             },
+///             _ => None,
+///         }
+///     }
+///
+///     fn set_string_value(mut self, field_name: &str, value: String) -> Self {
+///         match field_name {
+///             "ssn" => self.ssn = sea_orm::ActiveValue::Set(value),
+///             "credit_card" => self.credit_card = sea_orm::ActiveValue::Set(value),
+///             _ => {}
+///         }
+///         self
+///     }
+/// }
+/// ```
+#[macro_export]
+macro_rules! impl_encryptable_fields {
+    ($model:ty, [$($field:ident),* $(,)?]) => {
+        impl $crate::encryption::Encryptable for $model {
+            fn encrypted_fields() -> Vec<String> {
+                vec![$(stringify!($field).to_string()),*]
+            }
+
+            fn get_set_string_value(&self, field_name: &str) -> Option<String> {
+                match field_name {
+                    $(
+                        stringify!($field) => {
+                            match &self.$field {
+                                sea_orm::ActiveValue::Set(v) => Some(v.clone()),
+                                _ => None,
+                            }
+                        }
+                    )*
+                    _ => None,
+                }
+            }
+
+            fn set_string_value(mut self, field_name: &str, value: String) -> Self {
+                match field_name {
+                    $(
+                        stringify!($field) => {
+                            self.$field = sea_orm::ActiveValue::Set(value);
+                        }
+                    )*
+                    _ => {}
+                }
+                self
+            }
+        }
+    };
+}
+
+/// Validate encryption configuration at startup
+///
+/// Call this during application boot to fail fast on misconfiguration.
+/// Returns Ok(()) if encryption is not configured (optional feature).
+///
+/// # Errors
+/// Returns an error if the configuration is invalid:
+/// - Primary key is present but invalid format/length
+/// - Key derivation is enabled but salt is missing or invalid
+///
+/// # Example
+/// ```rust,ignore
+/// // In your app's boot sequence
+/// if let Some(config) = &app_config.encryption {
+///     loco_rs::encryption::validate_config(config)?;
+/// }
+/// ```
+pub fn validate_config(config: &config::EncryptionConfig) -> EncryptionResult<()> {
+    // Validate primary key format and length
+    if config.has_primary_key() {
+        let _ = cipher::parse_hex_key(&config.primary_key)
+            .map_err(|e| EncryptionError::InvalidKey(format!("primary_key: {e}")))?;
+    }
+
+    // Validate key derivation salt if enabled
+    if let Some(ref kd) = config.key_derivation {
+        if kd.enabled {
+            let salt = kd.salt.as_ref().ok_or_else(|| {
+                EncryptionError::NotConfigured(
+                    "key_derivation.salt is required when derivation is enabled".to_string(),
+                )
+            })?;
+            let _ = cipher::parse_hex_key(salt)
+                .map_err(|e| EncryptionError::InvalidKey(format!("key_derivation.salt: {e}")))?;
+        }
+    }
+
+    // Warn about empty previous_keys entries (don't fail, just log)
+    for (i, key) in config.previous_keys.iter().enumerate() {
+        if key.trim().is_empty() {
+            tracing::warn!(
+                "encryption.previous_keys[{}] is empty and will be skipped",
+                i
+            );
+        } else if cipher::parse_hex_key(key).is_err() {
+            tracing::warn!(
+                "encryption.previous_keys[{}] has invalid format and will be skipped",
+                i
+            );
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn valid_hex_key() -> String {
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f".to_string()
+    }
+
+    #[test]
+    fn test_validate_config_valid() {
+        let config = config::EncryptionConfig {
+            primary_key: valid_hex_key(),
+            previous_keys: vec![],
+            key_derivation: None,
+        };
+        assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn test_validate_config_invalid_primary_key() {
+        let config = config::EncryptionConfig {
+            primary_key: "too_short".to_string(),
+            previous_keys: vec![],
+            key_derivation: None,
+        };
+        assert!(validate_config(&config).is_err());
+    }
+
+    #[test]
+    fn test_validate_config_key_derivation_missing_salt() {
+        let config = config::EncryptionConfig {
+            primary_key: valid_hex_key(),
+            previous_keys: vec![],
+            key_derivation: Some(config::KeyDerivationConfig {
+                enabled: true,
+                salt: None,
+            }),
+        };
+        assert!(validate_config(&config).is_err());
+    }
+
+    #[test]
+    fn test_validate_config_key_derivation_invalid_salt() {
+        let config = config::EncryptionConfig {
+            primary_key: valid_hex_key(),
+            previous_keys: vec![],
+            key_derivation: Some(config::KeyDerivationConfig {
+                enabled: true,
+                salt: Some("invalid".to_string()),
+            }),
+        };
+        assert!(validate_config(&config).is_err());
+    }
+
+    #[test]
+    fn test_validate_config_key_derivation_valid() {
+        let config = config::EncryptionConfig {
+            primary_key: valid_hex_key(),
+            previous_keys: vec![],
+            key_derivation: Some(config::KeyDerivationConfig {
+                enabled: true,
+                salt: Some(valid_hex_key()),
+            }),
+        };
+        assert!(validate_config(&config).is_ok());
+    }
+}

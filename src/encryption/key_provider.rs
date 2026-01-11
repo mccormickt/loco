@@ -2,15 +2,58 @@
 //!
 //! This module defines the `KeyProvider` trait for abstracting encryption key management,
 //! and provides a default implementation that reads keys from Loco's configuration.
+//!
+//! # Security
+//!
+//! Keys are automatically zeroed from memory when providers are dropped, using the
+//! `zeroize` crate. This helps prevent keys from being leaked in memory dumps or
+//! through other memory disclosure vulnerabilities.
 
 use hkdf::Hkdf;
 use sha2::Sha256;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use super::{
     cipher::{parse_hex_key, KEY_SIZE},
     config::EncryptionConfig,
     errors::{EncryptionError, EncryptionResult},
 };
+
+/// A key that is automatically zeroed when dropped
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
+pub struct SecureKey(Vec<u8>);
+
+impl SecureKey {
+    /// Create a new secure key from raw bytes
+    #[must_use]
+    pub fn new(key: Vec<u8>) -> Self {
+        Self(key)
+    }
+
+    /// Get the key bytes (borrowed)
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// Get a cloned copy of the key bytes
+    ///
+    /// Note: The cloned Vec will NOT be automatically zeroed.
+    /// Prefer using `as_bytes()` when possible.
+    #[must_use]
+    pub fn to_vec(&self) -> Vec<u8> {
+        self.0.clone()
+    }
+}
+
+impl std::fmt::Debug for SecureKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never print the actual key
+        f.debug_struct("SecureKey")
+            .field("len", &self.0.len())
+            .finish()
+    }
+}
 
 /// Trait for providing encryption keys
 ///
@@ -58,12 +101,17 @@ pub trait KeyProvider: Send + Sync {
 ///
 /// This provider parses encryption keys from the application's YAML configuration,
 /// which supports environment variable templating via `{{ get_env(...) }}`.
+///
+/// # Security
+///
+/// All keys stored in this provider are wrapped in [`SecureKey`], which ensures
+/// they are zeroed from memory when the provider is dropped.
 #[derive(Debug, Clone)]
 pub struct ConfigKeyProvider {
     config: EncryptionConfig,
-    primary_key: Vec<u8>,
-    previous_keys: Vec<Vec<u8>>,
-    salt: Option<Vec<u8>>,
+    primary_key: SecureKey,
+    previous_keys: Vec<SecureKey>,
+    salt: Option<SecureKey>,
 }
 
 impl ConfigKeyProvider {
@@ -78,13 +126,13 @@ impl ConfigKeyProvider {
             ));
         }
 
-        let primary_key = parse_hex_key(&config.primary_key)?;
+        let primary_key = SecureKey::new(parse_hex_key(&config.primary_key)?);
 
         // Parse previous keys, skipping invalid ones with a warning
-        let previous_keys: Vec<Vec<u8>> = config
+        let previous_keys: Vec<SecureKey> = config
             .valid_previous_keys()
             .iter()
-            .filter_map(|k| parse_hex_key(k).ok())
+            .filter_map(|k| parse_hex_key(k).ok().map(SecureKey::new))
             .collect();
 
         // Parse salt if key derivation is enabled
@@ -93,7 +141,7 @@ impl ConfigKeyProvider {
                 .key_derivation
                 .as_ref()
                 .and_then(|kd| kd.salt.as_ref())
-                .map(|s| parse_hex_key(s))
+                .map(|s| parse_hex_key(s).map(SecureKey::new))
                 .transpose()?
         } else {
             None
@@ -114,7 +162,7 @@ impl ConfigKeyProvider {
         })?;
 
         // Use HKDF to derive a field-specific key
-        let hk = Hkdf::<Sha256>::new(Some(salt), master_key);
+        let hk = Hkdf::<Sha256>::new(Some(salt.as_bytes()), master_key);
 
         let mut derived_key = vec![0u8; KEY_SIZE];
         hk.expand(field_name.as_bytes(), &mut derived_key)
@@ -126,7 +174,7 @@ impl ConfigKeyProvider {
 
 impl KeyProvider for ConfigKeyProvider {
     fn get_encryption_key(&self) -> EncryptionResult<Vec<u8>> {
-        Ok(self.primary_key.clone())
+        Ok(self.primary_key.to_vec())
     }
 
     fn get_key_id(&self) -> Option<String> {
@@ -135,9 +183,9 @@ impl KeyProvider for ConfigKeyProvider {
 
     fn get_field_key(&self, field_name: &str) -> EncryptionResult<Vec<u8>> {
         if self.config.is_key_derivation_enabled() {
-            self.derive_key(&self.primary_key, field_name)
+            self.derive_key(self.primary_key.as_bytes(), field_name)
         } else {
-            Ok(self.primary_key.clone())
+            Ok(self.primary_key.to_vec())
         }
     }
 
@@ -145,11 +193,11 @@ impl KeyProvider for ConfigKeyProvider {
         let mut keys = Vec::with_capacity(1 + self.previous_keys.len());
 
         // Primary key first
-        keys.push((self.primary_key.clone(), Some("primary".to_string())));
+        keys.push((self.primary_key.to_vec(), Some("primary".to_string())));
 
         // Then previous keys (for rotation support)
         for (i, key) in self.previous_keys.iter().enumerate() {
-            keys.push((key.clone(), Some(format!("previous_{i}"))));
+            keys.push((key.to_vec(), Some(format!("previous_{i}"))));
         }
 
         Ok(keys)
@@ -157,9 +205,14 @@ impl KeyProvider for ConfigKeyProvider {
 }
 
 /// A simple key provider for testing or when keys are already in memory
+///
+/// # Security
+///
+/// The key is wrapped in [`SecureKey`], which ensures it is zeroed from
+/// memory when the provider is dropped.
 #[derive(Debug, Clone)]
 pub struct StaticKeyProvider {
-    key: Vec<u8>,
+    key: SecureKey,
     key_id: Option<String>,
 }
 
@@ -175,7 +228,10 @@ impl StaticKeyProvider {
                 key.len()
             )));
         }
-        Ok(Self { key, key_id })
+        Ok(Self {
+            key: SecureKey::new(key),
+            key_id,
+        })
     }
 
     /// Create from a hex-encoded key string
@@ -190,7 +246,7 @@ impl StaticKeyProvider {
 
 impl KeyProvider for StaticKeyProvider {
     fn get_encryption_key(&self) -> EncryptionResult<Vec<u8>> {
-        Ok(self.key.clone())
+        Ok(self.key.to_vec())
     }
 
     fn get_key_id(&self) -> Option<String> {
@@ -307,5 +363,52 @@ mod tests {
     fn test_static_key_provider_invalid_size() {
         let short_key = vec![0u8; 16];
         assert!(StaticKeyProvider::new(short_key, None).is_err());
+    }
+
+    #[test]
+    fn test_secure_key_zeroize() {
+        // Test that Zeroize trait is implemented and works
+        let mut key = SecureKey::new(vec![0xAA; 32]);
+
+        // Verify key has expected content before zeroing
+        assert!(key.as_bytes().iter().all(|&b| b == 0xAA));
+
+        // Manually call zeroize (what Drop does internally via ZeroizeOnDrop)
+        key.zeroize();
+
+        // After zeroize, all bytes should be zero
+        assert!(
+            key.as_bytes().iter().all(|&b| b == 0),
+            "SecureKey should be zeroed after zeroize() call"
+        );
+    }
+
+    #[test]
+    fn test_secure_key_debug_does_not_leak() {
+        let key = SecureKey::new(vec![0x42; 32]);
+        let debug_output = format!("{:?}", key);
+
+        // Debug output should NOT contain the actual key bytes
+        assert!(
+            !debug_output.contains("42"),
+            "Debug output should not contain key bytes"
+        );
+        assert!(
+            debug_output.contains("SecureKey"),
+            "Debug output should identify the type"
+        );
+        assert!(
+            debug_output.contains("len"),
+            "Debug output should show length"
+        );
+    }
+
+    #[test]
+    fn test_secure_key_clone() {
+        let key1 = SecureKey::new(vec![0x55; 32]);
+        let key2 = key1.clone();
+
+        // Both keys should have same content
+        assert_eq!(key1.as_bytes(), key2.as_bytes());
     }
 }
