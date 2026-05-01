@@ -31,7 +31,13 @@ pub fn generate(
             continue;
         }
 
-        let field_type = parse_field_type(ftype)?;
+        let mut field_type = parse_field_type(ftype)?;
+        // Scaffolding cares about the underlying Rust type — encryption is a
+        // serialization concern handled at the model layer. Strip any
+        // `:encrypted` modifier and continue as if it weren't there.
+        if let crate::infer::FieldType::Encrypted { inner, .. } = field_type {
+            field_type = *inner;
+        }
         match field_type {
             crate::infer::FieldType::Reference => {
                 let col_name = format!("{fname}_id");
@@ -70,6 +76,10 @@ pub fn generate(
                 }
 
                 columns.push((fname.clone(), rust_type.to_string(), ftype));
+            }
+            crate::infer::FieldType::Encrypted { .. } => {
+                // Already unwrapped above; this branch is unreachable.
+                unreachable!("encrypted modifier should have been peeled off");
             }
         }
     }

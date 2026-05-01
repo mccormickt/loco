@@ -12,6 +12,12 @@ pub enum MigrationType {
     Empty,
 }
 
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum EncryptionMode {
+    NonDeterministic,
+    Deterministic,
+}
+
 pub enum FieldType {
     Reference,
     ReferenceWithCustomField(String),
@@ -19,24 +25,62 @@ pub enum FieldType {
     NullableReferenceWithCustomField(String),
     Type(String),
     TypeWithParameters(String, Vec<String>),
+    /// A column whose Rust-level value is encrypted before persistence.
+    ///
+    /// The DB column is still typed by the inner type (e.g. `string`,
+    /// `text`); only the in-row value is wrapped in the Loco encryption
+    /// envelope. References cannot be encrypted.
+    Encrypted {
+        inner: Box<FieldType>,
+        mode: EncryptionMode,
+    },
 }
 
 pub fn parse_field_type(ftype: &str) -> Result<FieldType> {
     let parts: Vec<&str> = ftype.split(':').collect();
 
-    match parts.as_slice() {
-        ["references?"] => Ok(FieldType::NullableReference),
-        ["references?", f] => Ok(FieldType::NullableReferenceWithCustomField(
-            (*f).to_string(),
-        )),
-        ["references"] => Ok(FieldType::Reference),
-        ["references", f] => Ok(FieldType::ReferenceWithCustomField((*f).to_string())),
-        [t] => Ok(FieldType::Type((*t).to_string())),
-        [t, params @ ..] => Ok(FieldType::TypeWithParameters(
+    // Peel off a trailing `:encrypted` or `:encrypted:deterministic` modifier
+    // so it can be recognized regardless of the underlying column type.
+    let (base, encryption) = match parts.as_slice() {
+        [.., "encrypted", "deterministic"] => (
+            &parts[..parts.len() - 2],
+            Some(EncryptionMode::Deterministic),
+        ),
+        [.., "encrypted"] => (
+            &parts[..parts.len() - 1],
+            Some(EncryptionMode::NonDeterministic),
+        ),
+        _ => (&parts[..], None),
+    };
+
+    let inner = match base {
+        ["references?"] => FieldType::NullableReference,
+        ["references?", f] => FieldType::NullableReferenceWithCustomField((*f).to_string()),
+        ["references"] => FieldType::Reference,
+        ["references", f] => FieldType::ReferenceWithCustomField((*f).to_string()),
+        [t] => FieldType::Type((*t).to_string()),
+        [t, params @ ..] => FieldType::TypeWithParameters(
             (*t).to_string(),
             params.iter().map(ToString::to_string).collect::<Vec<_>>(),
-        )),
-        [] => Err(Error::Message(format!("cannot parse type: `{ftype}`"))),
+        ),
+        [] => return Err(Error::Message(format!("cannot parse type: `{ftype}`"))),
+    };
+
+    match encryption {
+        None => Ok(inner),
+        Some(mode) => match inner {
+            FieldType::Reference
+            | FieldType::ReferenceWithCustomField(_)
+            | FieldType::NullableReference
+            | FieldType::NullableReferenceWithCustomField(_) => Err(Error::Message(format!(
+                "cannot encrypt a reference field: `{ftype}` (encryption applies to values, not \
+                 foreign keys)"
+            ))),
+            other => Ok(FieldType::Encrypted {
+                inner: Box::new(other),
+                mode,
+            }),
+        },
     }
 }
 pub fn guess_migration_type(migration_name: &str) -> MigrationType {
