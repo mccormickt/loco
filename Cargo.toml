@@ -32,7 +32,7 @@ default = [
 ]
 auth_jwt = ["dep:jsonwebtoken"]
 # Model field encryption (AES-256-GCM)
-encryption = ["dep:aes-gcm", "dep:hkdf", "dep:hmac", "dep:sha2", "dep:zeroize"]
+encryption = ["dep:aes-gcm", "dep:flate2", "dep:hkdf", "dep:hmac", "dep:sha2", "dep:zeroize"]
 cli = ["dep:clap"]
 testing = ["dep:axum-test", "dep:scraper", "dep:tree-fs"]
 with-db = [
@@ -117,6 +117,7 @@ rand = { version = "0.9", features = ["std"] }
 
 # Encryption (optional, enabled with `encryption` feature)
 aes-gcm = { version = "0.10", optional = true }
+flate2 = { version = "1.0", optional = true }
 hkdf = { version = "0.12", optional = true }
 hmac = { version = "0.12", optional = true }
 sha2 = { version = "0.10", optional = true }
