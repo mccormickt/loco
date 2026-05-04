@@ -227,7 +227,13 @@ async fn deterministic_envelope_carries_d_flag() {
     let provider = registry::require(&ctx).unwrap();
     let det_master = provider.get_deterministic_key().unwrap().unwrap();
     let field_key = provider.derive_field_key(&det_master, "email").unwrap();
-    let again = cipher::encrypt_deterministic("alice@example.com", field_key.as_bytes(), provider.get_key_id()).unwrap();
+    let again = cipher::encrypt_deterministic(
+        "alice@example.com",
+        field_key.as_bytes(),
+        provider.get_key_id(),
+        b"",
+    )
+    .unwrap();
     let stored = raw_email.clone();
     assert_eq!(again, stored, "deterministic ciphertext must be reproducible");
 
