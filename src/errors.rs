@@ -27,6 +27,13 @@ impl From<serde_json::Error> for Error {
     }
 }
 
+#[cfg(feature = "encryption")]
+impl From<crate::encryption::EncryptionError> for Error {
+    fn from(val: crate::encryption::EncryptionError) -> Self {
+        Self::Message(val.to_string()).bt()
+    }
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("{inner}\n{backtrace}")]
